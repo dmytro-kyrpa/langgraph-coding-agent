@@ -1,0 +1,18 @@
+# virtual environment
+venv/
+.venv/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+
+# secrets / env
+.env
+*.key
+
+# claude config (if ever present here)
+.claude*/
+
+# os
+.DS_Store
