@@ -1,7 +1,8 @@
 # Self-Correcting Coding Agent + Benchmark (LangGraph)
 
-Two things, built to demonstrate the agentic-PM toolkit end-to-end: **(1) a self-correcting coding
-agent**, and **(2) a benchmark that runs that agent against expected-performance envelopes.**
+Three capabilities, built to demonstrate the agentic-PM toolkit end-to-end: **(1) a self-correcting
+coding agent**, **(2) a benchmark** that grades it against expected-performance envelopes, and
+**(3) a shadow mode** that compares a cheap vs. a stronger model on cost and quality.
 
 ### 1. The agent (`agent.py`)
 An agentic coding assistant built in **LangGraph**. Give it a **function spec + tests**; it proposes
@@ -22,12 +23,18 @@ set of tasks — but it measures more than pass/fail. Each task carries an **exp
 (max attempts / tokens / cost / latency), and every run is scored **against** it: **PASS** (solved &
 within budget), **OVER** (solved but blew a threshold — a regression signal), **FAIL** (unsolved). It
 reports **Pass@1 vs Pass@k** and average cost/time. This turns "does it work?" into "does it work
-*within the agreed cost and latency budget?*" — a **regression / SLA test**. It also ships a
-**shadow mode** (`python benchmark.py shadow`) that runs the same tasks on a **cheap vs. a stronger
-model** and reports the cost/quality trade-off ("same quality at X% of the cost").
+*within the agreed cost and latency budget?*" — a **regression / SLA test**.
 
-The agent and the benchmark are **not two codebases** — the benchmark imports the agent
-(`from agent import run_autonomous`) and drives it in an unattended mode built into the same graph.
+### 3. Shadow mode (`python benchmark.py shadow`)
+A mode of the benchmark that runs the same tasks on a **cheap primary** model *and* a **stronger
+baseline**, and compares them on **cost *and* quality**. It answers the money question every LLM
+product faces: *is the cheap model good enough to ship?* Same quality at lower cost → the cheap model
+wins; a quality gap → those failures are exactly the tasks that would need a human or the pricier
+model. It's the cost/quality trade-off that decides real LLM-product economics.
+
+The agent and the benchmark are **not separate codebases** — the benchmark imports the agent
+(`from agent import run_autonomous`) and drives it unattended; shadow mode is just the benchmark run
+across two models.
 
 ---
 
