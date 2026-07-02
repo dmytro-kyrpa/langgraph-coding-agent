@@ -3,15 +3,32 @@ from typing import TypedDict
 from langgraph.graph import StateGraph, START, END
 from langchain_anthropic import ChatAnthropic
 
-llm = ChatAnthropic(model="claude-haiku-4-5-20251001")
+# $ per 1,000,000 tokens (input, output) — ILLUSTRATIVE; set to your provider's real rates.
+PRICES = {
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
+    "claude-sonnet-4-6":         (3.00, 15.00),
+    "claude-opus-4-8":           (15.00, 75.00),
+}
+DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
-# $ per 1,000,000 tokens — set to Haiku 4.5's real rates
-PRICE_IN = 1.00
-PRICE_OUT = 5.00
+def price_of(model):
+    return PRICES.get(model, (1.00, 5.00))
+
+def cost_of(state):
+    pin, pout = price_of(state["model"])
+    return state["in_tokens"] / 1e6 * pin + state["out_tokens"] / 1e6 * pout
+
+# one client per model, created lazily and reused (so the benchmark can swap models)
+_llm_cache = {}
+def get_llm(model):
+    if model not in _llm_cache:
+        _llm_cache[model] = ChatAnthropic(model=model)
+    return _llm_cache[model]
 
 class State(TypedDict):
     spec: str
     tests: str
+    model: str
     plan: str
     plan_decision: str
     plan_feedback: str
@@ -77,7 +94,7 @@ Tests it must pass:
 Describe your APPROACH in 2-3 short sentences (interpretation, algorithm, edge cases). Do NOT write code yet."""
     if state.get("plan_feedback"):
         prompt += f"\n\nThe human asked you to revise: {state['plan_feedback']}\nRevise accordingly."
-    r = llm.invoke(prompt)
+    r = get_llm(state["model"]).invoke(prompt)
     ti, to, total = count_tokens(state, r)
     return {"plan": r.content, "plan_feedback": "",
             "in_tokens": state["in_tokens"] + ti, "out_tokens": state["out_tokens"] + to, "total_tokens": total}
@@ -117,7 +134,7 @@ It must pass these tests:
     prompt += "\nReply with ONLY the Python function code in a single code block — no explanation."
     if not state.get("auto"):
         print(f"\n[Attempt {state['attempts'] + 1}] asking Claude to write code...")
-    r = llm.invoke(prompt)
+    r = get_llm(state["model"]).invoke(prompt)
     ti, to, total = count_tokens(state, r)
     return {"code": r.content, "attempts": state["attempts"] + 1,
             "in_tokens": state["in_tokens"] + ti, "out_tokens": state["out_tokens"] + to, "total_tokens": total}
@@ -177,13 +194,14 @@ def report(state):
     if state.get("auto"):
         return {}                                           # benchmark does its own reporting
     elapsed = time.time() - state["start_time"]
-    cost = state["in_tokens"] / 1e6 * PRICE_IN + state["out_tokens"] / 1e6 * PRICE_OUT
+    cost = cost_of(state)
     status = ("solved ✅" if state.get("result") == "pass"
               else ("stopped 🛑 budget" if state["total_tokens"] >= state["token_budget"] else "ended"))
     print("\n--- FINAL CODE ---")
     print(extract_code(state["code"]) if state.get("code") else "(no code written)")
     print("\n========= SCORECARD =========")
     print(f"  Status:     {status}")
+    print(f"  Model:      {state['model']}")
     print(f"  Attempts:   {state['attempts']} (max {state['max_attempts']})")
     print(f"  In tokens:  {state['in_tokens']}")
     print(f"  Out tokens: {state['out_tokens']}")
@@ -208,9 +226,10 @@ g.add_conditional_edges("human", route_human, {"plan": "plan", "write_code": "wr
 g.add_edge("report", END)
 app = g.compile()
 
-def _initial(spec, tests, max_attempts, token_budget, auto):
+def _initial(spec, tests, model, max_attempts, token_budget, auto):
     return {
-        "spec": spec, "tests": tests, "plan": "", "plan_decision": "", "plan_feedback": "",
+        "spec": spec, "tests": tests, "model": model,
+        "plan": "", "plan_decision": "", "plan_feedback": "",
         "code": "", "result": "", "reason": "", "feedback": "",
         "attempts": 0, "max_attempts": max_attempts, "human_decision": "",
         "in_tokens": 0, "out_tokens": 0, "total_tokens": 0, "token_budget": token_budget,
@@ -218,8 +237,8 @@ def _initial(spec, tests, max_attempts, token_budget, auto):
     }
 
 # programmatic entry point for the benchmark (no prompts, returns final state)
-def run_autonomous(spec, tests, max_attempts=3, token_budget=10000):
-    return app.invoke(_initial(spec, tests, max_attempts, token_budget, auto=True),
+def run_autonomous(spec, tests, model=DEFAULT_MODEL, max_attempts=3, token_budget=10000):
+    return app.invoke(_initial(spec, tests, model, max_attempts, token_budget, auto=True),
                       config={"recursion_limit": 50})
 
 # interactive entry point
@@ -227,5 +246,5 @@ if __name__ == "__main__":
     print("Enter the function SPEC (one line):")
     spec = input("spec> ")
     tests = collect_tests()
-    app.invoke(_initial(spec, tests, max_attempts=3, token_budget=8000, auto=False),
+    app.invoke(_initial(spec, tests, DEFAULT_MODEL, max_attempts=3, token_budget=8000, auto=False),
                config={"recursion_limit": 50})

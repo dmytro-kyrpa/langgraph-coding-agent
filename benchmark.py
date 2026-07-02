@@ -1,8 +1,5 @@
-import time
-from agent import run_autonomous, PRICE_IN, PRICE_OUT
-
-def cost_of(st):
-    return st["in_tokens"] / 1e6 * PRICE_IN + st["out_tokens"] / 1e6 * PRICE_OUT
+import sys, time
+from agent import run_autonomous, cost_of, DEFAULT_MODEL
 
 # ============================================================
 #  GOLDEN SET — each task has:
@@ -64,53 +61,56 @@ GOLDEN_SET = [
     },
 ]
 
+BASELINE_MODEL = "claude-sonnet-4-6"   # stronger/pricier reference for shadow mode
 
-def check_envelope(st, elapsed, cost, exp):
+
+def _run(task, model):
+    """Run one golden task on one model; return a compact result row."""
+    t0 = time.time()
+    st = run_autonomous(task["spec"], task["tests"], model=model,
+                        max_attempts=3, token_budget=10000)
+    return {
+        "solved": st["result"] == "pass",
+        "first_try": st["result"] == "pass" and st["attempts"] == 1,
+        "attempts": st["attempts"],
+        "tokens": st["total_tokens"],
+        "cost": cost_of(st),
+        "time": time.time() - t0,
+    }
+
+
+def check_envelope(r, exp):
     """Return the list of expected metrics the run EXCEEDED (empty = within budget)."""
     over = []
-    if st["attempts"] > exp["max_attempts"]:
-        over.append(f"attempts {st['attempts']}>{exp['max_attempts']}")
-    if st["total_tokens"] > exp["max_tokens"]:
-        over.append(f"tokens {st['total_tokens']}>{exp['max_tokens']}")
-    if cost > exp["max_cost"]:
-        over.append(f"cost ${cost:.4f}>${exp['max_cost']:.3f}")
-    if elapsed > exp["max_latency"]:
-        over.append(f"time {elapsed:.0f}s>{exp['max_latency']}s")
+    if r["attempts"] > exp["max_attempts"]:
+        over.append(f"attempts {r['attempts']}>{exp['max_attempts']}")
+    if r["tokens"] > exp["max_tokens"]:
+        over.append(f"tokens {r['tokens']}>{exp['max_tokens']}")
+    if r["cost"] > exp["max_cost"]:
+        over.append(f"cost ${r['cost']:.4f}>${exp['max_cost']:.3f}")
+    if r["time"] > exp["max_latency"]:
+        over.append(f"time {r['time']:.0f}s>{exp['max_latency']}s")
     return over
 
 
-def run_benchmark():
-    print(f"Running benchmark — {len(GOLDEN_SET)} tasks (each checked against its expected envelope)\n")
+# ============================================================
+#  MODE 1 — single-model benchmark against expected envelopes
+# ============================================================
+def run_benchmark(model=DEFAULT_MODEL):
+    print(f"Benchmark — {len(GOLDEN_SET)} tasks on {model} (each checked against its envelope)\n")
     rows = []
     for task in GOLDEN_SET:
-        t0 = time.time()
-        st = run_autonomous(task["spec"], task["tests"], max_attempts=3, token_budget=10000)
-        elapsed = time.time() - t0
-        solved = st["result"] == "pass"
-        cost = cost_of(st)
-        over = check_envelope(st, elapsed, cost, task["expected"]) if solved else []
-
-        if not solved:
-            status = "FAIL ❌"          # didn't solve at all
-        elif over:
-            status = "OVER ⚠️"          # solved, but blew the performance envelope
-        else:
-            status = "PASS ✅"          # solved AND within budget
-
-        rows.append({
-            "id": task["id"], "status": status, "solved": solved,
-            "first_try": solved and st["attempts"] == 1,
-            "attempts": st["attempts"], "tokens": st["total_tokens"],
-            "cost": cost, "time": elapsed, "over": over,
-        })
+        r = _run(task, model)
+        over = check_envelope(r, task["expected"]) if r["solved"] else []
+        status = "PASS ✅" if (r["solved"] and not over) else ("OVER ⚠️" if r["solved"] else "FAIL ❌")
+        rows.append({**r, "id": task["id"], "status": status, "over": over})
         line = (f"  {task['id']:<18} {status:<8} "
-                f"attempts={st['attempts']} tokens={st['total_tokens']} "
-                f"cost=${cost:.4f} time={elapsed:.1f}s")
+                f"attempts={r['attempts']} tokens={r['tokens']} "
+                f"cost=${r['cost']:.4f} time={r['time']:.1f}s")
         if over:
             line += f"   ⚠️ over: {', '.join(over)}"
         print(line)
 
-    # ---- aggregate ----
     n = len(rows)
     solved_n = sum(r["solved"] for r in rows)
     first_n = sum(r["first_try"] for r in rows)
@@ -119,7 +119,7 @@ def run_benchmark():
     total_cost = sum(r["cost"] for r in rows)
 
     print("\n=============== BENCHMARK SUMMARY ===============")
-    print(f"  Tasks:                    {n}")
+    print(f"  Model:                    {model}")
     print(f"  Pass@k  (solved at all):  {solved_n}/{n}  ({solved_n/n*100:.0f}%)")
     print(f"  Pass@1  (solved 1st try): {first_n}/{n}  ({first_n/n*100:.0f}%)")
     print(f"  Within envelope (PASS):   {pass_n}/{n}")
@@ -130,5 +130,49 @@ def run_benchmark():
     print("================================================")
 
 
+# ============================================================
+#  MODE 2 — shadow mode: run the SAME golden set on two models
+#  and compare quality vs cost ("X% more solved at Y× the cost")
+# ============================================================
+def run_shadow(primary=DEFAULT_MODEL, baseline=BASELINE_MODEL):
+    print(f"Shadow-mode — primary={primary}  vs  baseline={baseline}\n")
+    print(f"  {'task':<18} {'PRIMARY':<28} BASELINE")
+
+    def fmt(r):
+        return f"{'PASS' if r['solved'] else 'FAIL'} a={r['attempts']} ${r['cost']:.4f} {r['time']:.1f}s"
+
+    p_solved = b_solved = 0
+    p_cost = b_cost = 0.0
+    p_time = b_time = 0.0
+    for task in GOLDEN_SET:
+        p = _run(task, primary)
+        b = _run(task, baseline)
+        p_solved += p["solved"]; b_solved += b["solved"]
+        p_cost += p["cost"];     b_cost += b["cost"]
+        p_time += p["time"];     b_time += b["time"]
+        print(f"  {task['id']:<18} {fmt(p):<28} {fmt(b)}")
+
+    n = len(GOLDEN_SET)
+    print("\n=============== SHADOW SUMMARY ===============")
+    print(f"  Primary  {primary}")
+    print(f"    solved {p_solved}/{n} ({p_solved/n*100:.0f}%)  total ${p_cost:.4f}  avg {p_time/n:.1f}s")
+    print(f"  Baseline {baseline}")
+    print(f"    solved {b_solved}/{n} ({b_solved/n*100:.0f}%)  total ${b_cost:.4f}  avg {b_time/n:.1f}s")
+    if p_cost > 0 and b_cost > 0:
+        pct = p_cost / b_cost * 100
+        mult = b_cost / p_cost
+        print(f"\n  → Primary solved {p_solved/n*100:.0f}% vs {b_solved/n*100:.0f}%, "
+              f"at {pct:.0f}% of baseline cost ({mult:.1f}× cheaper).")
+        delta = b_solved - p_solved
+        if delta > 0:
+            print(f"    Baseline solved {delta} more task(s) — the cost/quality trade-off to decide on.")
+        elif delta == 0:
+            print(f"    Same tasks solved — the cheaper model is the clear choice here.")
+    print("=============================================")
+
+
 if __name__ == "__main__":
-    run_benchmark()
+    if len(sys.argv) > 1 and sys.argv[1] == "shadow":
+        run_shadow()
+    else:
+        run_benchmark()
